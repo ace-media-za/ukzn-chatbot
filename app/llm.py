@@ -1,4 +1,4 @@
-"""Small asynchronous client wrapper around the local Ollama chat API."""
+"""Asynchronous connector to Ollama for chat generation and text embeddings."""
 
 from collections.abc import AsyncIterator, Sequence
 
@@ -11,14 +11,20 @@ from app.config import Settings
 class OllamaConnector:
     """Manage one reusable asynchronous connection to the configured Ollama host.
 
-    Instances are created during FastAPI startup and closed during shutdown.
+    The API creates one instance during FastAPI startup and closes it during
+    shutdown; ``scripts/ingest.py`` creates its own for the duration of a run.
     """
 
     def __init__(self, settings: Settings) -> None:
-        """Create a connector using the host and chat model in ``settings``."""
+        """Create a connector for the host, chat model and embedding model in ``settings``.
+
+        Args:
+            settings: Application settings providing the Ollama configuration.
+        """
 
         self._client = AsyncClient(host=str(settings.ollama_host))
         self._chat_model = settings.ollama_chat_model
+        self._embed_model = settings.ollama_embed_model
 
     async def stream_chat(self, messages: Sequence[Message]) -> AsyncIterator[str]:
         """Yield non-empty text chunks from Ollama's streaming chat response.
@@ -26,6 +32,14 @@ class OllamaConnector:
         Args:
             messages: System and conversation messages in Ollama's message
                 format.
+
+        Yields:
+            Text fragments in generation order.
+
+        Raises:
+            httpx.HTTPError: If Ollama cannot be reached mid-stream.
+            ollama.ResponseError: If Ollama rejects the request, for example
+                because the model is not installed.
         """
 
         stream = await self._client.chat(model=self._chat_model, messages=messages, stream=True)
@@ -33,11 +47,35 @@ class OllamaConnector:
             if chunk.message.content:
                 yield chunk.message.content
 
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed texts with the configured embedding model.
+
+        Callers add the ``nomic-embed-text`` task prefix themselves
+        (``search_query: `` or ``search_document: ``, see ``app.knowledge``).
+
+        Args:
+            texts: Texts to embed in one request.
+
+        Returns:
+            One embedding vector per input text, in input order.
+
+        Raises:
+            ConnectionError: If Ollama cannot be reached.
+            ollama.ResponseError: If Ollama rejects the request.
+        """
+
+        response = await self._client.embed(model=self._embed_model, input=list(texts))
+        return [list(vector) for vector in response.embeddings]
+
     async def missing_models(self) -> list[str]:
-        """Return configured model names that are not installed in Ollama."""
+        """List configured chat and embedding models that Ollama does not have installed.
+
+        Returns:
+            Sorted model names; empty when everything is installed.
+        """
 
         installed = {m.model for m in (await self._client.list()).models}
-        required = {self._chat_model}
+        required = {self._chat_model, self._embed_model}
         # Ollama reports untagged names as ":latest"
         return sorted(m for m in required if m not in installed and f"{m}:latest" not in installed)
 
@@ -48,6 +86,10 @@ class OllamaConnector:
 
 
 def get_llm(request: Request) -> OllamaConnector:
-    """FastAPI dependency that returns the application-scoped Ollama connector."""
+    """FastAPI dependency that returns the application-scoped Ollama connector.
+
+    Args:
+        request: Current request, used to reach ``app.state``.
+    """
 
     return request.app.state.llm

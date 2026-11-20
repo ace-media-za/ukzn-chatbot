@@ -1,8 +1,4 @@
-"""Legacy PostgreSQL helpers retained for reference.
-
-The direct-Ollama application does not import this module or open a database
-connection. It can be removed if vector-search support will not return.
-"""
+"""PostgreSQL connection pool and FastAPI dependency for knowledge-base search."""
 
 from collections.abc import AsyncIterator
 
@@ -15,13 +11,27 @@ from app.config import Settings
 
 
 async def _configure(conn: AsyncConnection) -> None:
-    """Register pgvector adapters for a newly opened asynchronous connection."""
+    """Register pgvector type adapters on a newly opened pooled connection.
+
+    Args:
+        conn: Connection just opened by the pool.
+    """
 
     await register_vector_async(conn)
 
 
 def create_pool(settings: Settings) -> AsyncConnectionPool:
-    """Create a closed PostgreSQL pool for the former retrieval workflow."""
+    """Create the application's PostgreSQL connection pool without opening it.
+
+    The pool is opened and closed by the FastAPI lifespan in ``main.py``.
+    Every connection is configured with pgvector adapters.
+
+    Args:
+        settings: Application settings providing the DSN and pool sizes.
+
+    Returns:
+        An unopened asynchronous connection pool.
+    """
 
     return AsyncConnectionPool(
         conninfo=str(settings.database_url),
@@ -33,7 +43,17 @@ def create_pool(settings: Settings) -> AsyncConnectionPool:
 
 
 async def get_conn(request: Request) -> AsyncIterator[AsyncConnection]:
-    """Yield a pooled PostgreSQL connection for a request in retrieval mode."""
+    """FastAPI dependency that yields a pooled PostgreSQL connection.
+
+    The connection is returned to the pool when the request's dependency
+    scope ends.
+
+    Args:
+        request: Current request, used to reach the application-scoped pool.
+
+    Yields:
+        A connection configured with pgvector adapters.
+    """
 
     pool: AsyncConnectionPool = request.app.state.pool
     async with pool.connection() as conn:
